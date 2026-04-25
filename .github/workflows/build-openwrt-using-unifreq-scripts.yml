@@ -1,127 +1,25 @@
-#==========================================================================
-# Description: Build OpenWrt for SW799 (RK3399) - Customized by hangjiacai
-#==========================================================================
-
-name: Build OpenWrt using Unifreq scripts
-
-on:
-  repository_dispatch:
-  workflow_dispatch:
-    inputs:
-      openwrt_soc:
-        description: "Select device board."
-        required: false
-        default: "rk3399"
-        type: choice
-        options:
-          - rk3399
-          - all
-      customize_rk3399:
-        description: "Set customize rk3399 devices"
-        required: false
-        default: "sw799:rk3399-bozz-sw799.dtb"
-        type: choice
-        options:
-          - "sw799:rk3399-bozz-sw799.dtb"
-          - none
-      openwrt_ip:
-        description: "Set OpenWrt default IP address"
-        required: false
-        default: "192.168.100.1"
-      kernel_repo:
-        description: "Set the kernel repository"
-        required: false
-        default: "ophub/kernel"
-        type: choice
-        options:
-          - ophub/kernel
-      openwrt_kernel:
-        description: "Select kernel version"
-        required: false
-        default: "6.12.y_6.18.y"
-        type: choice
-        options:
-          - 6.12.y_6.18.y
-          - 6.6.y
-      auto_kernel:
-        description: "Auto use the latest kernel"
-        required: false
-        default: true
-        type: boolean
-      builder_name:
-        description: "Set OpenWrt builder signature."
-        required: false
-        default: "hangjiacai"
-        type: choice
-        options:
-          - hangjiacai
-          - ophub
-
-env:
-  TZ: Etc/UTC
-
-jobs:
-  build:
-    runs-on: ubuntu-24.04
-    if: ${{ github.event.repository.owner.id == github.event.sender.id }}
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Initialize the build environment
-        id: init
-        run: |
-          docker rmi -f $(docker images -q) 2>/dev/null || true
-          sudo -E apt-get -y update
-          sudo -E apt-get -y install $(curl -fsSL https://ophub.org/ubuntu2404-make-openwrt-depends)
-          echo "status=success" >> ${GITHUB_OUTPUT}
-
-      - name: Download OpenWrt rootfs file
+- name: Download OpenWrt rootfs file
         id: download
         if: ${{ steps.init.outputs.status == 'success' }}
         run: |
-          # 自动寻找您刚才跑成功的那个 Release
-          latest_version=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.api.github.com/repos/${{ github.repository }}/releases/latest)
+          # 1. 修正了 API 地址 (删掉了多余的 .api)
+          # 2. 增加了 -L 参数允许重定向
+          latest_version=$(curl -s -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/latest")
           
-          # 获取下载地址（包含您之前做的 rootfs.tar.gz）
+          # 3. 提取 rootfs 下载链接
           latest_url=$(echo ${latest_version} | jq -r '.assets[] | select(.name | endswith("-rootfs.tar.gz")) | .url' | head -n 1)
           
+          if [[ -z "${latest_url}" || "${latest_url}" == "null" ]]; then
+            echo "错误：在 Release 中没找到 rootfs 文件！请确认之前的源码编译任务是否已经成功变绿。"
+            exit 1
+          fi
+          
           mkdir -p opt/download
+          # 4. 执行下载
           curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
                -H "Accept: application/octet-stream" "${latest_url}" \
                -o "opt/download/rootfs.tar.gz"
           
           echo "build_tag=SW799_Custom_$(date +"%Y.%m.%d")" >> ${GITHUB_ENV}
           echo "status=success" >> ${GITHUB_OUTPUT}
-
-      - name: Package OpenWrt Firmware
-        uses: ophub/flippy-openwrt-actions@main
-        if: ${{ steps.download.outputs.status == 'success' }}
-        env:
-          OPENWRT_ARMSR: opt/download/rootfs.tar.gz
-          PACKAGE_SOC: ${{ inputs.openwrt_soc }}
-          KERNEL_REPO_URL: ${{ inputs.kernel_repo }}
-          KERNEL_VERSION_NAME: ${{ inputs.openwrt_kernel }}
-          KERNEL_AUTO_LATEST: ${{ inputs.auto_kernel }}
-          OPENWRT_IP: ${{ inputs.openwrt_ip }}
-          CUSTOMIZE_RK3399: ${{ inputs.customize_rk3399 }}
-          WHOAMI: ${{ inputs.builder_name }}
-
-      - name: Upload OpenWrt Firmware to Release
-        uses: ncipollo/release-action@main
-        if: ${{ env.PACKAGED_STATUS == 'success' }}
-        with:
-          tag: ${{ env.build_tag }}
-          artifacts: ${{ env.PACKAGED_OUTPUTPATH }}/*
-          allowUpdates: true
-          token: ${{ secrets.GITHUB_TOKEN }}
-          body: |
-            ### SW799 专属定制固件 - 编译完成
-            - **作者**: ${{ inputs.builder_name }}
-            - **默认 IP**: `192.168.100.1`
-            - **插件说明**: 包含 Docker, HomeProxy, Lucky (取决于 rootfs 源码)
-            - **DTB**: `rk3399-bozz-sw799.dtb`
